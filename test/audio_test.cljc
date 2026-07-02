@@ -1,6 +1,161 @@
 (ns audio-test
+  "Tests for the `audio` / `audio.binaural` / `audio.wav` restoration.
+  Ports EVERY original Rust `#[test]` from `kami-audio`'s `src/lib.rs`,
+  `src/binaural.rs`, `src/wav.rs` (deleted PR #82) 1:1 (same assertions),
+  plus the pre-existing scaffold smoke test."
   (:require [clojure.test :refer [deftest is testing]]
-            [audio]))
+            [audio :as audio]
+            [audio.binaural :as bin]
+            [audio.wav :as wav]
+            #?(:clj [clojure.string :as str])))
+
+;; ---------------------------------------------------------------------
+;; Smoke test (pre-existing scaffold test, fixed).
+;; ---------------------------------------------------------------------
+
 (deftest namespace-loads
-  (testing "the restored CLJC namespace loads"
-    (is (some? audio))))
+  (testing "the restored CLJC namespaces load"
+    (is (some? (the-ns 'audio)))
+    (is (some? (the-ns 'audio.binaural)))
+    (is (some? (the-ns 'audio.wav)))))
+
+;; ---------------------------------------------------------------------
+;; audio.cljc <- lib.rs `mod tests`
+;; ---------------------------------------------------------------------
+
+(deftest test-spatialize
+  (testing "source to the right should be louder in the right channel (test_spatialize)"
+    (let [mixer (audio/audio-mixer)
+          source (audio/audio-source {:id 1
+                                       :position [5.0 0.0 0.0]
+                                       :volume 1.0
+                                       :pitch 1.0
+                                       :looping false
+                                       :max-distance 100.0
+                                       :rolloff :linear
+                                       :priority 5
+                                       :channel :sfx})
+          [l r pan] (audio/spatialize mixer source)]
+      (is (> r l) "source to the right should be louder in right channel")
+      (is (> pan 0.0)))))
+
+;; ---------------------------------------------------------------------
+;; audio.binaural.cljc <- binaural.rs `mod tests`
+;; ---------------------------------------------------------------------
+
+(defn- default-listener []
+  ;; at the origin, facing -Z, up +Y -> +X is right
+  {:position [0.0 0.0 0.0] :forward [0.0 0.0 -1.0] :up [0.0 1.0 0.0]})
+
+(deftest source-on-the-right-leads-and-is-louder
+  (let [p (bin/spatialize (default-listener) (bin/hrtf) (bin/rolloff) [5.0 0.0 0.0] 1.0)]
+    (is (> (:itd-s p) 0.0) "right source -> right ear leads (positive ITD)")
+    (is (and (> (:delay-l-s p) 0.0) (= (:delay-r-s p) 0.0)) "left ear delayed")
+    (is (and (> (:ild-db p) 0.0) (> (:gain-r p) (:gain-l p))) "right louder")
+    (is (< (Math/abs (- (:azimuth p) (/ Math/PI 2))) 1e-4))))
+
+(deftest left-mirrors-right
+  (let [l (default-listener)
+        r (bin/spatialize l (bin/hrtf) (bin/rolloff) [5.0 0.0 0.0] 1.0)
+        lft (bin/spatialize l (bin/hrtf) (bin/rolloff) [-5.0 0.0 0.0] 1.0)]
+    (is (< (Math/abs (+ (:itd-s lft) (:itd-s r))) 1e-6))
+    (is (< (Math/abs (- (:gain-l lft) (:gain-r r))) 1e-6))
+    (is (< (Math/abs (- (:gain-r lft) (:gain-l r))) 1e-6))))
+
+(deftest dead-ahead-is-centered
+  (let [p (bin/spatialize (default-listener) (bin/hrtf) (bin/rolloff) [0.0 0.0 -5.0] 1.0)]
+    (is (and (< (Math/abs (:itd-s p)) 1e-6) (< (Math/abs (:ild-db p)) 1e-6)))
+    (is (< (Math/abs (- (:gain-l p) (:gain-r p))) 1e-6))))
+
+(deftest itd-within-physical-bound
+  ;; approx a/c*(pi/2+1) approx 0.66 ms for a 0.0875 m head.
+  (let [p (bin/spatialize (default-listener) (bin/hrtf) (bin/rolloff) [100.0 0.0 0.0] 1.0)]
+    (is (and (> (:itd-s p) 5.0e-4) (< (:itd-s p) 7.0e-4)))))
+
+(deftest sample-delays-are-integers-at-rate
+  (let [p (bin/spatialize (default-listener) (bin/hrtf) (bin/rolloff) [5.0 0.0 0.0] 1.0)
+        [dl dr] (bin/sample-delays p 48000)]
+    (is (and (> dl 0) (= dr 0)))))
+
+(deftest mix-places-impulse-per-ear-with-itd-and-gain
+  ;; Right source: right ear at frame 0 (no delay), left ear delayed by ITD.
+  (let [p (bin/spatialize (default-listener) (bin/hrtf) (bin/rolloff) [5.0 0.0 0.0] 1.0)
+        [dl dr] (bin/sample-delays p 48000)]
+    (is (and (> dl 0) (= dr 0)))
+    (let [impulse [1.0]
+          out (bin/mix-stereo [(bin/voice p impulse)] 48000 64)]
+      ;; Right channel: impulse at frame 0 scaled by gain_r.
+      (is (< (Math/abs (- (nth out 1) (:gain-r p))) 1e-6))
+      ;; Left channel: impulse appears at the ITD-delayed frame scaled by gain_l.
+      (is (< (Math/abs (- (nth out (* dl 2)) (:gain-l p))) 1e-6))
+      ;; Left channel frame 0 is silent (it was delayed).
+      (is (= (nth out 0) 0.0)))))
+
+(deftest mix-sums-multiple-voices
+  (let [p (bin/spatialize (default-listener) (bin/hrtf) (bin/rolloff) [0.0 0.0 -5.0] 1.0)
+        a [0.5] b [0.25]
+        out (bin/mix-stereo [(bin/voice p a) (bin/voice p b)] 48000 8)]
+    ;; Both centered & undelayed -> frame-0 left = (0.5+0.25)*gain_l.
+    (is (< (Math/abs (- (nth out 0) (* 0.75 (:gain-l p)))) 1e-6))))
+
+(deftest rolloff-is-unit-at-reference-and-decreasing
+  (doseq [kind [:inverse :linear :exponential]]
+    (let [r (bin/rolloff {:kind kind})]
+      (is (< (Math/abs (- (bin/rolloff-gain r 1.0) 1.0)) 1e-6))
+      (is (> (bin/rolloff-gain r 1.0) (bin/rolloff-gain r 10.0)))))
+  (is (< (Math/abs (- (bin/rolloff-gain (bin/rolloff {:kind :none}) 99.0) 1.0)) 1e-6)))
+
+;; ---------------------------------------------------------------------
+;; audio.wav.cljc <- wav.rs `mod tests`
+;; ---------------------------------------------------------------------
+
+#?(:clj
+   (defn- ubyte [b] (bit-and b 0xff)))
+
+#?(:clj
+   (defn- u16-le [barr i] (bit-or (ubyte (aget barr i)) (bit-shift-left (ubyte (aget barr (inc i))) 8))))
+
+#?(:clj
+   (defn- u32-le [barr i]
+     (bit-or (ubyte (aget barr i))
+             (bit-shift-left (ubyte (aget barr (+ i 1))) 8)
+             (bit-shift-left (ubyte (aget barr (+ i 2))) 16)
+             (bit-shift-left (ubyte (aget barr (+ i 3))) 24))))
+
+#?(:clj
+   (defn- i16-le [barr i]
+     (let [v (u16-le barr i)]
+       (if (>= v 0x8000) (- v 0x10000) v))))
+
+#?(:clj
+   (defn- ascii [barr start end]
+     (String. (java.util.Arrays/copyOfRange barr start end) "US-ASCII")))
+
+#?(:clj
+   (deftest wav-header-and-size-are-correct
+     (let [stereo (vec (repeat 200 0.0)) ; 100 frames
+           w (wav/encode-pcm16-stereo stereo 48000)]
+       (is (= (ascii w 0 4) "RIFF"))
+       (is (= (ascii w 8 12) "WAVE"))
+       (is (= (ascii w 12 16) "fmt "))
+       (is (= (ascii w 36 40) "data"))
+       ;; 44-byte header + 2 bytes per sample.
+       (is (= (count w) (+ 44 (* (count stereo) 2))))
+       ;; channels field = 2
+       (is (= (u16-le w 22) 2))
+       ;; sample rate field
+       (is (= (u32-le w 24) 48000)))))
+
+#?(:clj
+   (deftest renders-a-spatialized-source-to-wav
+     ;; A source on the right -> mix -> encode. End-to-end binaural -> sink.
+     (let [p (bin/spatialize (default-listener) (bin/hrtf) (bin/rolloff) [5.0 0.0 0.0] 1.0)
+           tone (mapv (fn [i] (* (Math/sin (* i 0.1)) 0.5)) (range 480))
+           stereo (bin/mix-stereo [(bin/voice p tone)] 48000 512)
+           w (wav/encode-pcm16-stereo stereo 48000)]
+       (is (= (ascii w 0 4) "RIFF"))
+       (is (= (count w) (+ 44 (* 512 2 2)))) ; 512 frames x 2 ch x 2 bytes
+       ;; Right channel carries energy (source is on the right); some sample non-zero.
+       (let [pcm (mapv #(i16-le w (+ 44 (* 2 %))) (range (/ (- (count w) 44) 2)))
+             right-samples (keep-indexed (fn [i v] (when (odd? i) v)) pcm)]
+         (is (some #(not= % 0) right-samples) "right channel has signal")))))
