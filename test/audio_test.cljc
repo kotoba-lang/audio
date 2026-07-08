@@ -15,9 +15,9 @@
 
 (deftest namespace-loads
   (testing "the restored CLJC namespaces load"
-    (is (some? (the-ns 'audio)))
-    (is (some? (the-ns 'audio.binaural)))
-    (is (some? (the-ns 'audio.wav)))))
+    (is (some? (find-ns 'audio)))
+    (is (some? (find-ns 'audio.binaural)))
+    (is (some? (find-ns 'audio.wav)))))
 
 ;; ---------------------------------------------------------------------
 ;; audio.cljc <- lib.rs `mod tests`
