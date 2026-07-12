@@ -49,12 +49,42 @@ implementations are intentionally independent and are not unified by
 this restoration — `rtc.spatial` documents its own relationship to
 this crate in its namespace docstring.
 
+## Wave 2 — synthesis / filter / effects / mixer (ADR-2607121400)
+
+Adds the DSP layer this repo's role as the `ongaku` domain's L2
+executor was missing (pure functions over plain sample buffers, no
+device/callback code, same discipline as the modules above):
+
+- **`src/audio/synth.cljc`** — sine/square/saw/triangle oscillators
+  (non band-limited — plain waveform generators, aliasing not
+  mitigated in v0) and an ADSR envelope generator
+  (`adsr` + `apply-envelope`), with `seconds->samples` converting
+  time to an exact integer sample count once, at the boundary.
+- **`src/audio/filter.cljc`** — one-pole (6 dB/octave) low-pass and
+  high-pass filters, derived from the analog RC low-pass discretized
+  via backward difference. Not a substitute for a biquad/SVF when
+  steeper slopes are needed.
+- **`src/audio/effects.cljc`** — a feedback delay line (circular
+  buffer, exact integer delay length, wet/dry mix) and a feed-forward
+  compressor (one-pole envelope follower, threshold/ratio/attack/release).
+- **`src/audio/mixer.cljc`** — an offline mixer bus graph: tracks
+  (mono buffer + gain + equal-power pan) route into buses, buses can
+  route into other buses (a real graph), `find-cycle` detects bus-to-bus
+  cycles before `render-bus-graph` sums everything to a stereo buffer.
+  Shape intentionally close to `kami-ongaku-project`'s bus/track model
+  (no hard dependency).
+
+Not in scope for v0: realtime/AudioWorklet playback (this is an
+offline/batch renderer), band-limited oscillators, biquad filters,
+sidechain compression, automation curves (that's `kami-ongaku-project`'s
+job — this repo just renders a static mix).
+
 ## Tests
 
 All 11 original Rust `#[test]`s (1 from `lib.rs`, 8 from `binaural.rs`,
 2 from `wav.rs`) ported 1:1 to `test/audio_test.cljc`, plus the
-pre-existing scaffold smoke test — **12 tests / 38 assertions, 0
-failures, 0 errors**.
+pre-existing scaffold smoke test, plus 18 new Wave 2 tests — **30
+tests / 180 assertions, 0 failures, 0 errors**.
 
 ## Develop
 
