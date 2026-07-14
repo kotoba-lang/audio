@@ -35,7 +35,7 @@
   discriminant order (0..4) — matters because `:channel-volumes` on the
   mixer is a 5-element vector indexed by this order (mirrors
   `source.channel as usize` in the original `spatialize`)."
-  [:master :music :sfx :voice :ambient])
+  [:master :music :sfx :voice :ambient :ui])
 
 (def channel->index
   "`:channel` keyword -> index into `AudioMixer`'s `:channel-volumes`."
@@ -79,7 +79,7 @@
   ([opts]
    (merge {:listener (listener)
            :sources []
-           :channel-volumes (vec (repeat 5 1.0))
+           :channel-volumes (vec (repeat (count channel-values) 1.0))
            :master-volume 0.8
            :max-voices 32}
           opts)))

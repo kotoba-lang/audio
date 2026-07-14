@@ -38,6 +38,13 @@ the port is complete (nothing was intentionally left out).
   JVM-binary-export pattern already used in `kotoba-lang/engineer-io`'s
   `engineer-io.stl/export-binary` and `kotoba-lang/pnr`'s
   `pnr.gdsii`); CLJS implementation via `js/ArrayBuffer` + `js/DataView`.
+- **`src/audio/runtime.cljc`** — provider-neutral game-audio control
+  plane: master/music/SFX/voice/ambient/UI buses, gain and mute,
+  voice/UI ducking, deterministic scene crossfade action plans,
+  listener/source state and stable priority voice admission. Web Audio
+  and native hosts execute these pure actions rather than reimplement policy.
+- **`resources/audio/runtime.edn`** — machine-readable runtime contract
+  for host adapters and game manifests.
 
 ## Relationship to `kotoba-lang/rtc`
 
@@ -83,8 +90,9 @@ job — this repo just renders a static mix).
 
 All 11 original Rust `#[test]`s (1 from `lib.rs`, 8 from `binaural.rs`,
 2 from `wav.rs`) ported 1:1 to `test/audio_test.cljc`, plus the
-pre-existing scaffold smoke test, plus 18 new Wave 2 tests — **30
-tests / 180 assertions, 0 failures, 0 errors**.
+pre-existing scaffold smoke test, 18 Wave 2 DSP tests and three
+game-runtime contract tests — **33 tests / 196 assertions, 0 failures,
+0 errors**.
 
 ## Develop
 
