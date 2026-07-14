@@ -5,6 +5,7 @@
   plus the pre-existing scaffold smoke test."
   (:require [clojure.test :refer [deftest is testing]]
             [audio :as audio]
+            [audio.runtime :as runtime]
             [audio.binaural :as bin]
             [audio.wav :as wav]
             #?(:clj [clojure.string :as str])))
@@ -38,6 +39,58 @@
           [l r pan] (audio/spatialize mixer source)]
       (is (> r l) "source to the right should be louder in right channel")
       (is (> pan 0.0)))))
+
+(deftest game-runtime-buses-mute-and-ducking
+  (let [state (runtime/runtime {:master 0.8})
+        [_ state] (runtime/set-bus-gain state :music 0.5)]
+    (is (= 0.4 (runtime/effective-gain state :music)))
+    (let [[_ ducked] (runtime/begin-duck state :voice)]
+      (is (< (Math/abs (- 0.14 (runtime/effective-gain ducked :music))) 1.0e-9))
+      (is (= 0.8 (runtime/effective-gain ducked :sfx)))
+      (let [[_ restored] (runtime/end-duck ducked :voice)
+            [_ muted] (runtime/set-bus-muted restored :music true)]
+        (is (= 0.4 (runtime/effective-gain restored :music)))
+        (is (= 0.0 (runtime/effective-gain muted :music))))))
+  (is (= :invalid-bus-gain
+         (second (runtime/set-bus-gain (runtime/runtime) :unknown 0.5))))
+  (is (= :invalid-gain (second (runtime/set-master (runtime/runtime) :loud)))))
+
+(deftest game-runtime-scene-crossfade-is-deterministic
+  (let [explore #:scene{:id :explore :transition-ms 500
+                        :music #:cue{:id :explore :uri "/audio/explore.ogg"
+                                    :bus :music :loop? true :gain 0.7}
+                        :ambient [#:cue{:id :wind :uri "/audio/wind.ogg"
+                                       :bus :ambient :loop? true}]}
+        combat #:scene{:id :combat :transition-ms 200
+                       :music #:cue{:id :combat :uri "/audio/combat.ogg"
+                                   :bus :music :loop? true}}
+        [_ state] (runtime/register-scene (runtime/runtime) explore)
+        [_ state] (runtime/register-scene state combat)
+        [_ actions state] (runtime/transition-scene state :explore 1000)]
+    (is (= [:fade-in :ensure-loop] (mapv :audio/action actions)))
+    (is (= 1500 (get-in state [:audio/transition :transition/ends-at])))
+    (is (= :waiting (first (runtime/advance state 1499))))
+    (let [[_ _ state] (runtime/advance state 1500)
+          [_ actions state] (runtime/transition-scene state :combat 2000)]
+      (is (= [:fade-out :fade-in] (mapv :audio/action actions)))
+      (is (= :explore (get-in (first actions) [:cue :cue/id])))
+      (is (= :combat (get-in state [:audio/music :cue/id])))))
+  (is (= :invalid-audio-scene
+         (second (runtime/register-scene (runtime/runtime)
+                                         #:scene{:id :bad :music {:cue/id :bad}})))))
+
+(deftest game-runtime-source-admission-is-priority-stable
+  (let [source (fn [id priority]
+                 #:source{:id id :bus :sfx :position [0 0 0] :gain 1.0
+                          :max-distance 50.0 :priority priority})
+        state (runtime/runtime {:max-voices 2})
+        [_ state] (runtime/upsert-source state (source :low 1))
+        [_ state] (runtime/upsert-source state (source :high 10))
+        [_ state] (runtime/upsert-source state (source :mid 5))]
+    (is (= [:high :mid] (runtime/admitted-source-ids state)))
+    (let [[_ state] (runtime/set-listener state {:position [1 2 3]
+                                                 :forward [0 0 -1] :up [0 1 0]})]
+      (is (= [1 2 3] (get-in state [:audio/listener :position]))))))
 
 ;; ---------------------------------------------------------------------
 ;; audio.binaural.cljc <- binaural.rs `mod tests`
