@@ -8,7 +8,7 @@
             [audio.runtime :as runtime]
             [audio.binaural :as bin]
             [audio.wav :as wav]
-            #?(:clj [clojure.string :as str])))
+            #?(:clj [kotoba.lang.text :as str])))
 
 ;; ---------------------------------------------------------------------
 ;; Smoke test (pre-existing scaffold test, fixed).
