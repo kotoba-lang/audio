@@ -97,5 +97,5 @@ game-runtime contract tests — **33 tests / 196 assertions, 0 failures,
 ## Develop
 
 ```bash
-clojure -M:test
+kbb -M:test
 ```
